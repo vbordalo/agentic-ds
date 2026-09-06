@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Conda / virtual environments
+.env
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code local state
+.vscode/
+
+# Data
+data/raw/*
+
+# Generated artifacts
+artifacts/*
+logs/*
+
+# Keep directories in Git
+!data/raw/.gitkeep
+!artifacts/.gitkeep
+!logs/.gitkeep
