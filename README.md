@@ -77,3 +77,18 @@ Generated tokens:     84
 Generation speed:     29.83 tokens/s
 ```
 
+## Tool Calling Manual - sem LangChain, LangGraph ou qualquer framework agentic
+
+```shell
+User
+  ↓
+LLM
+  ↓
+tool request
+  ↓
+Python executa função
+  ↓
+resultado volta ao LLM
+  ↓
+LLM responde ao usuário
+```
