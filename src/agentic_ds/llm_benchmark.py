@@ -1,8 +1,11 @@
 from ollama import chat
 
 
-MODEL = "qwen2.5:1.5b"
-
+# MODEL = "qwen2.5:1.5b"
+MODEL = "qwen2.5:3b-instruct-q4_K_M"
+# MODEL = "qwen3:4b-q4_K_M"
+# MODEL = "phi4-mini:3.8b-q4_K_M"
+# MODEL = "llama3.2:3b-instruct-q5_K_M"
 
 def ns_to_seconds(value: int) -> float:
     return value / 1_000_000_000
