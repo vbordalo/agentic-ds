@@ -67,6 +67,7 @@ Concepts implemented:
 - looping through multiple steps
 - maintaining agent state across steps
 - using agent state to determine next actions
+- planning component to decompose user requests into tasks
 This is a more advanced version of the data tool loop.
 """
 
