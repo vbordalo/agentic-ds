@@ -1,14 +1,26 @@
+import inspect
 import json
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
+from data_tools import (describe_numeric_columns, inspect_dataframe,
+                        inspect_missing_values, load_dataset)
 from ollama import chat
 
-from data_tools import (
-    inspect_dataframe,
-    inspect_missing_values,
-    load_dataset,
-    describe_numeric_columns,
-)
-from dataclasses import dataclass, field
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+LOG_PATH = LOG_DIR / f"agent_run_{RUN_ID}.log"
+
+
+def log_event(title: str, content: str) -> None:
+    with LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(f"\n--- {title} ---\n")
+        f.write(content)
+        f.write("\n")
+
 
 @dataclass
 class AgentState:
@@ -51,13 +63,34 @@ def create_plan(user_request: str) -> list[str]:
                 "content": user_request,
             },
         ],
+        format="json",
     )
 
     planner_output = response.message.content
 
-    plan = json.loads(planner_output)
+    log_event("PLANNER RAW OUTPUT", planner_output)
 
-    return plan["tasks"]
+    try:
+        plan = json.loads(planner_output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "Planner did not return valid JSON.\n"
+            f"Raw output:\n{planner_output}"
+        ) from exc
+
+    if not isinstance(plan, dict):
+        raise ValueError("Planner output must be a JSON object.")
+
+    tasks = plan.get("tasks")
+
+    if not isinstance(tasks, list) or not all(
+        isinstance(task, str) for task in tasks
+    ):
+        raise ValueError(
+            "Planner output must contain a 'tasks' list of strings."
+        )
+
+    return tasks
 
 
 """
@@ -95,6 +128,9 @@ Available tools:
    Description:
    Inspect the structure of the currently loaded pandas DataFrame.
 
+   Arguments:
+    - None
+
    Returns:
    - number of rows
    - number of columns
@@ -105,6 +141,9 @@ Available tools:
 2. inspect_missing_values
    Description:
    Inspect missing values in the currently loaded pandas DataFrame.
+
+   Arguments:
+    - None
 
    Returns:
    - columns containing missing values
@@ -241,6 +280,7 @@ def main() -> None:
     print()
 
     user_message = input("User: ")
+    log_event("USER REQUEST", user_message)
     planned_tasks = create_plan(user_message)
 
     state = AgentState(
@@ -271,15 +311,22 @@ def main() -> None:
         },
     ]
 
+    # Loop through multiple steps, allowing the agent to call tools and update its state
     max_steps = 5
 
     for step in range(1, max_steps + 1):
         response = chat(
             model=MODEL,
             messages=messages,
+            format="json",
         )
 
         llm_output = response.message.content
+
+        log_event(
+            f"LLM DECISION {step}",
+            llm_output,
+        )
 
         try:
             decision = json.loads(llm_output)
@@ -309,6 +356,12 @@ def main() -> None:
             if state.remaining_tasks:
                 messages.append(
                     {
+                        "role": "assistant",
+                        "content": llm_output,
+                    }
+                )
+                messages.append(
+                    {
                         "role": "user",
                         "content": (
                             "You attempted to give a final answer, "
@@ -336,10 +389,48 @@ def main() -> None:
 
         arguments = decision.get("arguments", {})
 
-        tool_result = TOOLS[tool_name](
-            df,
-            **arguments,
-        )
+        if not isinstance(arguments, dict):
+            raise ValueError(
+                f"'arguments' must be an object, got {type(arguments).__name__}"
+            )
+
+        # Validate tool arguments before execution
+        tool_function = TOOLS[tool_name]
+        signature = inspect.signature(tool_function)
+
+        valid_arguments = {
+            name
+            for name in signature.parameters
+            if name != "df"
+        }
+
+        invalid_arguments = [
+            name
+            for name in arguments
+            if name not in valid_arguments
+        ]
+
+        if invalid_arguments:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": llm_output,
+                }
+            )
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"The tool '{tool_name}' does not accept these arguments: "
+                        f"{invalid_arguments}.\n"
+                        f"Valid arguments are: {sorted(valid_arguments)}.\n"
+                        "Return a corrected tool call using the required JSON format."
+                    ),
+                }
+            )
+            continue
+
 
         # Validation. We do not trust the LLM to always follow the schema.
         tasks = decision.get("tasks", [])
@@ -348,6 +439,12 @@ def main() -> None:
             raise ValueError(
                 f"'tasks' must be a list, got {type(tasks).__name__}"
             )
+
+        if not tasks:
+            raise ValueError(
+                "'tasks' must not be empty for a tool call."
+            )
+
     
         # Also validate that he didn't invent tasks:
         invalid_tasks = [
@@ -357,6 +454,12 @@ def main() -> None:
         ]
 
         if invalid_tasks:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": llm_output,
+                }
+            )
             messages.append(
                 {
                     "role": "user",
@@ -371,6 +474,18 @@ def main() -> None:
             )
             continue
 
+        tool_result = tool_function(
+            df,
+            **arguments,
+        )
+
+
+        log_event(
+            f"TOOL RESULT {step}: {tool_name}",
+            json.dumps(tool_result, indent=2),
+        )
+
+
         state.step = step
         state.completed_tools.append(tool_name)
 
@@ -383,21 +498,16 @@ def main() -> None:
             }
         )
 
+
         for task in tasks:
             if task in state.remaining_tasks:
                 state.remaining_tasks.remove(task)
                 state.completed_tasks.append(task)
 
-        if not state.remaining_tasks:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "All planned tasks have been completed. "
-                        "Return the final answer using the required JSON format."
-                    ),
-                }
-            )
+        log_event(
+            f"STATE AFTER STEP {step}",
+            format_state(state),
+        )
 
         messages.append(
             {
@@ -406,18 +516,30 @@ def main() -> None:
             }
         )
 
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "The tool has been executed.\n\n"
-                    "Current agent state:\n"
-                    + format_state(state)
-                    + "\n\n"
-                    "Decide the next action."
-                ),
-            }
-        )
+        if not state.remaining_tasks:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "All planned tasks have been completed.\n\n"
+                        "Current agent state:\n"
+                        + format_state(state)
+                        + "\n\nReturn the final answer using the required JSON format."
+                    ),
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The tool has been executed.\n\n"
+                        "Current agent state:\n"
+                        + format_state(state)
+                        + "\n\nDecide the next action."
+                    ),
+                }
+            )
 
     raise RuntimeError(
         f"Agent did not finish after {max_steps} steps."
