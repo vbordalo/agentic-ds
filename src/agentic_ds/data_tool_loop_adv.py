@@ -167,22 +167,16 @@ Available tools:
 
 You may use more than one tool if necessary.
 
-If you need to use a tool, respond ONLY with valid JSON:
+If you need to use a tool, respond ONLY with valid JSON
+using exactly this structure:
 
 {
   "type": "tool_call",
   "tool": "<tool_name>",
-  "arguments": {}
-}
-
-For a tool with arguments:
-
-{
-  "type": "tool_call",
-  "tool": "describe_numeric_columns",
-  "arguments": {
-    "columns": ["population", "medIncome"]
-  }
+  "arguments": {},
+  "tasks": [
+    "<exact planned task being addressed>"
+  ]
 }
 
 If you already have enough information to answer ALL parts of the
@@ -193,24 +187,13 @@ user's request, respond ONLY with valid JSON:
   "answer": "<your answer>"
 }
 
-When calling a tool, identify which planned task or tasks the call
-is intended to address.
+When calling a tool, include a non-empty "tasks" list containing
+the exact planned task or tasks that the call is intended to address.
 
 The "tasks" field MUST be a JSON list.
 
 Every item in "tasks" MUST exactly match one of the strings currently
 listed in remaining_tasks.
-
-Use this format:
-
-{
-  "type": "tool_call",
-  "tool": "<tool_name>",
-  "arguments": {},
-  "tasks": [
-    "<exact planned task being addressed>"
-  ]
-}
 
 Important rules:
 
