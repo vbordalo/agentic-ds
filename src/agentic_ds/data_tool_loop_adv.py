@@ -64,6 +64,7 @@ def create_plan(user_request: str) -> list[str]:
             },
         ],
         format="json",
+        options={"temperature": TEMPERATURE},
     )
 
     planner_output = response.message.content
@@ -93,6 +94,33 @@ def create_plan(user_request: str) -> list[str]:
     return tasks
 
 
+def synthesize_final_answer(state: AgentState) -> str:
+    response = chat(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": FINAL_SYNTHESIS_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Original user request:\n"
+                    + state.user_request
+                    + "\n\nAgent state and collected evidence:\n"
+                    + format_state(state)
+                ),
+            },
+        ],
+        options={
+            "temperature": TEMPERATURE,
+        },
+    )
+
+    final_output = response.message.content
+
+    return final_output
+
 """
 Agentic Data Science Assistant
 Concepts implemented:
@@ -111,6 +139,7 @@ This is a more advanced version of the data tool loop.
 MODEL = "qwen2.5:3b-instruct-q4_K_M" # 2.2 GB    100% GPU
 # MODEL = "qwen2.5:1.5b" # 1.2 GB    100% GPU
 
+TEMPERATURE = 0.0
 
 TOOLS = {
     "inspect_dataframe": inspect_dataframe,
@@ -179,14 +208,6 @@ using exactly this structure:
   ]
 }
 
-If you already have enough information to answer ALL parts of the
-user's request, respond ONLY with valid JSON:
-
-{
-  "type": "final_answer",
-  "answer": "<your answer>"
-}
-
 When calling a tool, include a non-empty "tasks" list containing
 the exact planned task or tasks that the call is intended to address.
 
@@ -199,7 +220,6 @@ Important rules:
 
 - Base conclusions only on information explicitly available from tool results.
 - Do not assume facts that have not been observed.
-- Before giving a final answer, check whether every part of the user's request has been answered.
 - If relevant information is still missing, use another appropriate tool.
 - Do not invent information about the dataset.
 
@@ -242,6 +262,23 @@ Tasks should be independently verifiable.
 """
 
 
+FINAL_SYNTHESIS_PROMPT = """
+You are the final response component of a data science assistant.
+
+Answer the user's original request using ONLY the evidence contained
+in the provided agent state.
+
+Rules:
+- Do not invent facts or calculations.
+- Distinguish counts, means, standard deviations, percentages,
+  and missing-value counts.
+- Do not describe analyses that were not performed.
+- Do not claim that all columns have a property when the evidence
+  only identifies some columns.
+- Do not mention future work or remaining tasks when there are none.
+- Be concise and directly answer the user's request.
+"""
+
 def main() -> None:
     df = load_dataset()
 
@@ -263,7 +300,23 @@ def main() -> None:
     print()
 
     user_message = input("User: ")
+
+    max_steps = 5
+
+    log_event(
+        "RUN CONFIG",
+        json.dumps(
+            {
+                "model": MODEL,
+                "max_steps": max_steps,
+                "temperature": TEMPERATURE,
+            },
+            indent=2,
+        ),
+    )
+
     log_event("USER REQUEST", user_message)
+
     planned_tasks = create_plan(user_message)
 
     state = AgentState(
@@ -295,13 +348,12 @@ def main() -> None:
     ]
 
     # Loop through multiple steps, allowing the agent to call tools and update its state
-    max_steps = 5
-
     for step in range(1, max_steps + 1):
         response = chat(
             model=MODEL,
             messages=messages,
             format="json",
+            options={"temperature": TEMPERATURE},
         )
 
         llm_output = response.message.content
@@ -332,32 +384,6 @@ def main() -> None:
 
             print("\n--- FINAL ANSWER ---\n")
             print(llm_output)
-            return
-
-
-        if decision["type"] == "final_answer":
-            if state.remaining_tasks:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": llm_output,
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You attempted to give a final answer, "
-                            "but the following planned tasks are still incomplete:\n"
-                            + json.dumps(state.remaining_tasks, indent=2)
-                            + "\nContinue working on the remaining tasks."
-                        ),
-                    }
-                )
-                continue
-
-            print("\n--- FINAL ANSWER ---\n")
-            print(decision["answer"])
             return
 
         if decision["type"] != "tool_call":
@@ -492,6 +518,19 @@ def main() -> None:
             format_state(state),
         )
 
+        if not state.remaining_tasks:
+            final_answer = synthesize_final_answer(state)
+
+            log_event(
+                "FINAL ANSWER",
+                final_answer,
+            )
+
+            print("\n--- FINAL ANSWER ---\n")
+            print(final_answer)
+            return
+
+
         messages.append(
             {
                 "role": "assistant",
@@ -499,30 +538,17 @@ def main() -> None:
             }
         )
 
-        if not state.remaining_tasks:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "All planned tasks have been completed.\n\n"
-                        "Current agent state:\n"
-                        + format_state(state)
-                        + "\n\nReturn the final answer using the required JSON format."
-                    ),
-                }
-            )
-        else:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "The tool has been executed.\n\n"
-                        "Current agent state:\n"
-                        + format_state(state)
-                        + "\n\nDecide the next action."
-                    ),
-                }
-            )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "The tool has been executed.\n\n"
+                    "Current agent state:\n"
+                    + format_state(state)
+                    + "\n\nDecide the next action."
+                ),
+            }
+        )
 
     raise RuntimeError(
         f"Agent did not finish after {max_steps} steps."
