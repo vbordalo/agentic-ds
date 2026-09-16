@@ -1,12 +1,15 @@
 import inspect
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import click
+from agent_state import AgentState, format_state
 from data_tools import (describe_numeric_columns, inspect_dataframe,
                         inspect_missing_values, load_dataset)
 from ollama import chat
+from planner import create_plan
+from synthesizer import synthesize_final_answer
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -22,104 +25,6 @@ def log_event(title: str, content: str) -> None:
         f.write("\n")
 
 
-@dataclass
-class AgentState:
-    user_request: str
-
-    planned_tasks: list[str] = field(default_factory=list)
-    completed_tasks: list[str] = field(default_factory=list)
-    remaining_tasks: list[str] = field(default_factory=list)
-
-    completed_tools: list[str] = field(default_factory=list)
-    tool_results: list[dict] = field(default_factory=list)
-
-    step: int = 0
-
-
-def format_state(state: AgentState) -> str:
-    return json.dumps(
-        {
-            "user_request": state.user_request,
-            "planned_tasks": state.planned_tasks,
-            "completed_tasks": state.completed_tasks,
-            "remaining_tasks": state.remaining_tasks,
-            "completed_tools": state.completed_tools,
-            "tool_results": state.tool_results,
-            "step": state.step,
-        },
-        indent=2,
-    )
-
-def create_plan(user_request: str) -> list[str]:
-    response = chat(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": PLANNER_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": user_request,
-            },
-        ],
-        format="json",
-        options={"temperature": TEMPERATURE},
-    )
-
-    planner_output = response.message.content
-
-    log_event("PLANNER RAW OUTPUT", planner_output)
-
-    try:
-        plan = json.loads(planner_output)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "Planner did not return valid JSON.\n"
-            f"Raw output:\n{planner_output}"
-        ) from exc
-
-    if not isinstance(plan, dict):
-        raise ValueError("Planner output must be a JSON object.")
-
-    tasks = plan.get("tasks")
-
-    if not isinstance(tasks, list) or not all(
-        isinstance(task, str) for task in tasks
-    ):
-        raise ValueError(
-            "Planner output must contain a 'tasks' list of strings."
-        )
-
-    return tasks
-
-
-def synthesize_final_answer(state: AgentState) -> str:
-    response = chat(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": FINAL_SYNTHESIS_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Original user request:\n"
-                    + state.user_request
-                    + "\n\nAgent state and collected evidence:\n"
-                    + format_state(state)
-                ),
-            },
-        ],
-        options={
-            "temperature": TEMPERATURE,
-        },
-    )
-
-    final_output = response.message.content
-
-    return final_output
 
 """
 Agentic Data Science Assistant
@@ -131,15 +36,6 @@ Concepts implemented:
 - planning component to decompose user requests into tasks
 This is a more advanced version of the data tool loop.
 """
-
-# MODEL = "qwen3:4b-q4_K_M" # 3.3 GB    27%/73% CPU/GPU
-# MODEL = "llama3.2:3b-instruct-q5_K_M" # 3.2 GB    24%/76% CPU/GPU
-# MODEL = "phi4-mini:3.8b-q4_K_M" # 3.1 GB    24%/76% CPU/GPU
-
-MODEL = "qwen2.5:3b-instruct-q4_K_M" # 2.2 GB    100% GPU
-# MODEL = "qwen2.5:1.5b" # 1.2 GB    100% GPU
-
-TEMPERATURE = 0.0
 
 TOOLS = {
     "inspect_dataframe": inspect_dataframe,
@@ -234,52 +130,33 @@ Do not repeat a tool unless there is a clear reason to do so.
 """
 
 
-PLANNER_PROMPT = """
-You are a planning component for a data science assistant.
+@click.command()
+@click.option(
+    "--model",
+    default="qwen2.5:3b-instruct-q4_K_M",
+    show_default=True,
+    help="Ollama model used by the agent.",
+)
+@click.option(
+    "--temperature",
+    default=0.0,
+    type=float,
+    show_default=True,
+    help="Sampling temperature.",
+)
+@click.option(
+    "--max-steps",
+    default=5,
+    type=int,
+    show_default=True,
+    help="Maximum number of executor steps.",
+)
+def main(
+    model: str,
+    temperature: float,
+    max_steps: int,
+) -> None:
 
-Your job is to decompose the user's request into the minimum set of
-information-gathering tasks required to answer it completely.
-
-Do not execute tools.
-Do not answer the user's question.
-Do not invent information about the dataset.
-
-Return ONLY valid JSON in this format:
-
-{
-  "tasks": [
-    "<task 1>",
-    "<task 2>"
-  ]
-}
-
-Each task should describe an information need, not a specific tool call.
-
-Keep the plan concise and avoid unnecessary tasks.
-Each task must represent one distinct information need.
-Do not combine multiple checks or analyses into a single task.
-Tasks should be independently verifiable.
-"""
-
-
-FINAL_SYNTHESIS_PROMPT = """
-You are the final response component of a data science assistant.
-
-Answer the user's original request using ONLY the evidence contained
-in the provided agent state.
-
-Rules:
-- Do not invent facts or calculations.
-- Distinguish counts, means, standard deviations, percentages,
-  and missing-value counts.
-- Do not describe analyses that were not performed.
-- Do not claim that all columns have a property when the evidence
-  only identifies some columns.
-- Do not mention future work or remaining tasks when there are none.
-- Be concise and directly answer the user's request.
-"""
-
-def main() -> None:
     df = load_dataset()
 
     print("\nExamples of questions you can ask:")
@@ -301,15 +178,13 @@ def main() -> None:
 
     user_message = input("User: ")
 
-    max_steps = 5
-
     log_event(
         "RUN CONFIG",
         json.dumps(
             {
-                "model": MODEL,
+                "model": model,
                 "max_steps": max_steps,
-                "temperature": TEMPERATURE,
+                "temperature": temperature,
             },
             indent=2,
         ),
@@ -317,7 +192,9 @@ def main() -> None:
 
     log_event("USER REQUEST", user_message)
 
-    planned_tasks = create_plan(user_message)
+    planned_tasks, planner_output = create_plan(user_message, model, temperature)
+
+    log_event("PLANNER RAW OUTPUT", planner_output)
 
     state = AgentState(
         user_request=user_message,
@@ -350,10 +227,10 @@ def main() -> None:
     # Loop through multiple steps, allowing the agent to call tools and update its state
     for step in range(1, max_steps + 1):
         response = chat(
-            model=MODEL,
+            model=model,
             messages=messages,
             format="json",
-            options={"temperature": TEMPERATURE},
+            options={"temperature": temperature},
         )
 
         llm_output = response.message.content
@@ -519,7 +396,7 @@ def main() -> None:
         )
 
         if not state.remaining_tasks:
-            final_answer = synthesize_final_answer(state)
+            final_answer = synthesize_final_answer(state, model, temperature)
 
             log_event(
                 "FINAL ANSWER",

@@ -79,6 +79,29 @@ Generation speed:     29.83 tokens/s
 
 ## Agent
 
+```text
+agent_runtime.py
+    ├── planner.create_plan()
+    ├── executor loop
+    ├── tool dispatch
+    ├── validation
+    ├── state transitions
+    ├── logging
+    └── synthesizer.synthesize_final_answer()
+
+agent_state.py
+    └── state representation
+
+planner.py
+    └── planning
+
+synthesizer.py
+    └── final language synthesis
+
+data_tools.py
+    └── deterministic domain capabilities
+```
+
 ```shell
 Planner
    ↓
