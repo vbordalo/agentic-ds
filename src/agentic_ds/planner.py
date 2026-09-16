@@ -29,7 +29,7 @@ Tasks should be independently verifiable.
 """
 
 
-def create_plan(user_request: str, model: str, temperature: float) -> list[str]:
+def create_plan(user_request: str, model: str, temperature: float) -> tuple[list[str], str]:
     response = chat(
         model=model,
         messages=[

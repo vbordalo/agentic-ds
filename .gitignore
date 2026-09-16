@@ -24,3 +24,6 @@ logs/*
 !data/raw/.gitkeep
 !artifacts/.gitkeep
 !logs/.gitkeep
+
+# Deprecated files/folders
+deprecated/
